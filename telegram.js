@@ -1,6 +1,6 @@
 const axios=require("axios")
 
-async function sendTG(text){
+async function sendTG(msg){
 
 const token=process.env.TG_TOKEN
 const chat=process.env.TG_CHAT
@@ -13,8 +13,7 @@ await axios.post(
 `https://api.telegram.org/bot${token}/sendMessage`,
 {
 chat_id:chat,
-text:text,
-disable_web_page_preview:true
+text:msg
 }
 )
 
