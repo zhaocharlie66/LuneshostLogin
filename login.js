@@ -1,13 +1,8 @@
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-const UserAgentOverride = require("puppeteer-extra-plugin-user-agent-override");
 
-// 核心：叠加反检测插件，彻底隐藏自动化特征
+// 仅保留有效的 stealth 插件
 puppeteer.use(StealthPlugin());
-puppeteer.use(UserAgentOverride({
-  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  locale: 'zh-CN,zh;q=0.9,en;q=0.8'
-}));
 
 // 环境变量
 const WEBSITE = process.env.WEBSITE_URL;
@@ -137,6 +132,13 @@ async function login() {
 
   const page = await browser.newPage();
   page.setDefaultTimeout(120000); // 全局超时120秒
+
+  // 手动设置真实的 User-Agent（替代无效插件）
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+  // 设置语言
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+  });
 
   // 终极反检测：覆盖所有自动化特征（Cloudflare 重点检测）
   await page.evaluateOnNewDocument(() => {
