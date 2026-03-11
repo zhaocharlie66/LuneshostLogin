@@ -8,29 +8,28 @@ return Math.floor(Math.random()*(max-min)+min)
 
 async function humanType(page,selector,text){
 
-for(const ch of text){
+for(const c of text){
 
-await page.type(selector,ch)
+await page.type(selector,c)
 
 await sleep(rand(80,180))
+
 }
 
 }
 
 async function randomMouse(page){
 
-const width=1200
-const height=800
-
-for(let i=0;i<10;i++){
+for(let i=0;i<12;i++){
 
 await page.mouse.move(
-rand(0,width),
-rand(0,height),
-{steps:rand(5,25)}
+rand(0,1200),
+rand(0,800),
+{steps:rand(10,40)}
 )
 
 await sleep(rand(50,200))
+
 }
 
 }
