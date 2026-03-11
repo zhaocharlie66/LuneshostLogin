@@ -120,32 +120,25 @@ async function handleTurnstile(page) {
 }
 
 async function login() {
-  // 关闭无头模式（或改为 headless: "new" 尝试新版无头模式）
-  // 注：生产环境若需无头，可改为 headless: "new"，并补充更多反检测配置
+  // 关键修改：使用新版无头模式，适配无图形界面的服务器环境
   const browser = await puppeteer.launch({
-    headless: false, // 先关闭无头模式，便于调试验证流程
+    headless: "new", // 新版无头模式（替代 false/true）
     args: [
-      "--no-sandbox",
+      "--no-sandbox", // 必须：服务器环境需要关闭沙箱
       "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
+      "--disable-dev-shm-usage", // 解决内存不足问题
       "--disable-blink-features=AutomationControlled",
-      "--start-maximized", // 最大化窗口，更贴近真人操作
-      "--disable-web-security", // 临时关闭跨域限制（可选）
-      "--disable-features=VizDisplayCompositor" // 修复部分无头模式渲染问题
+      "--start-maximized",
+      "--disable-web-security",
+      "--disable-features=VizDisplayCompositor",
+      "--window-size=1920,1080", // 显式设置窗口尺寸
+      "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36" // 固定高版本UA
     ]
   });
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1920, height: 1080 }); // 设置窗口尺寸
   page.setDefaultTimeout(120000); // 延长页面默认超时时间
-
-  // 更贴近真人的 UserAgent（随机化小版本号）
-  const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-  ];
-  await page.setUserAgent(userAgents[Math.floor(Math.random() * userAgents.length)]);
 
   // 清除自动化标识（强化反检测）
   await page.evaluateOnNewDocument(() => {
@@ -155,6 +148,10 @@ async function login() {
     });
     Object.defineProperty(navigator, 'plugins', {
       get: () => [1, 2, 3, 4, 5]
+    });
+    // 额外隐藏自动化特征
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined
     });
   });
 
