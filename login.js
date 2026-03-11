@@ -1,112 +1,184 @@
-const puppeteer = require("puppeteer");
-const axios = require("axios");
+const puppeteer = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+
+puppeteer.use(StealthPlugin());
 
 const WEBSITE = process.env.WEBSITE_URL;
 const USERNAME = process.env.USERNAME;
 const PASSWORD = process.env.PASSWORD;
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+function sleep(ms){
+  return new Promise(r=>setTimeout(r,ms));
 }
 
-async function waitForTurnstileToken(page) {
+async function simulateHuman(page){
 
-  console.log("[TURNSTILE] 等待自动验证...");
+  console.log("[HUMAN] 模拟用户行为");
 
-  const timeout = 30000;
-  const start = Date.now();
+  await page.mouse.move(200,200);
+  await sleep(500);
 
-  while (Date.now() - start < timeout) {
+  await page.mouse.move(400,400);
+  await sleep(500);
 
-    const token = await page.evaluate(() => {
-      const el = document.querySelector(
-        'textarea[name="cf-turnstile-response"]'
-      );
-      return el ? el.value : null;
-    });
+  await page.mouse.wheel({deltaY:300});
 
-    if (token && token.length > 10) {
-      console.log("[TURNSTILE] 验证成功");
-      return true;
-    }
+  await sleep(1000);
 
-    await sleep(1000);
-  }
-
-  console.log("[TURNSTILE] 未检测到 token");
-  return false;
 }
 
-async function detectTurnstile(page) {
+async function detectTurnstile(page){
 
-  console.log("[INFO] 检测 Turnstile...");
+  const exist = await page.evaluate(()=>{
 
-  const exists = await page.evaluate(() => {
-
-    if (document.querySelector('iframe[src*="challenges.cloudflare.com"]'))
+    if(document.querySelector('[name="cf-turnstile-response"]'))
       return true;
 
-    if (document.querySelector('[data-sitekey]'))
+    if(document.querySelector('label.cb-lb input[type="checkbox"]'))
       return true;
 
-    if (document.querySelector('textarea[name="cf-turnstile-response"]'))
+    if(document.querySelector('#success-text'))
       return true;
 
     return false;
+
   });
 
-  if (exists) {
-    console.log("[INFO] 发现 Turnstile");
-  } else {
-    console.log("[INFO] 未检测到 Turnstile");
-  }
+  return exist;
 
-  return exists;
 }
 
-async function login() {
+async function handleTurnstile(page){
+
+  console.log("[TURNSTILE] 检测 Turnstile");
+
+  const timeout = 60000;
+  const start = Date.now();
+
+  while(Date.now() - start < timeout){
+
+    const state = await page.evaluate(()=>{
+
+      const result={
+        success:false,
+        token:false,
+        checkbox:false
+      };
+
+      const success=document.querySelector("#success-text");
+
+      if(success && success.innerText.includes("成功")){
+        result.success=true;
+      }
+
+      const token=document.querySelector('[name="cf-turnstile-response"]');
+
+      if(token && token.value && token.value.length>20){
+        result.token=true;
+      }
+
+      const checkbox=document.querySelector('label.cb-lb input[type="checkbox"]');
+
+      if(checkbox){
+        result.checkbox=true;
+      }
+
+      return result;
+
+    });
+
+    if(state.success){
+      console.log("[TURNSTILE] success 状态");
+      return true;
+    }
+
+    if(state.token){
+      console.log("[TURNSTILE] token 已生成");
+      return true;
+    }
+
+    if(state.checkbox){
+
+      console.log("[TURNSTILE] 需要点击 checkbox");
+
+      const checkbox = await page.$('label.cb-lb input[type="checkbox"]');
+
+      if(checkbox){
+
+        await checkbox.click();
+
+        console.log("[TURNSTILE] checkbox 已点击");
+
+        await sleep(3000);
+
+      }
+
+    }
+
+    await sleep(1500);
+
+  }
+
+  throw new Error("Turnstile 验证超时");
+
+}
+
+async function login(){
 
   const browser = await puppeteer.launch({
-    headless: true,
-    args: [
+
+    headless:true,
+
+    args:[
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-blink-features=AutomationControlled"
     ]
+
   });
 
   const page = await browser.newPage();
 
-  page.setDefaultTimeout(30000);
+  page.setDefaultTimeout(60000);
 
   await page.setUserAgent(
+
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
   );
 
-  try {
+  try{
 
     console.log("[INFO] 打开登录页面");
 
-    await page.goto(WEBSITE, {
-      waitUntil: "networkidle2"
+    await page.goto(WEBSITE,{
+      waitUntil:"networkidle2"
     });
+
+    await simulateHuman(page);
+
+    console.log("[INFO] 输入账号密码");
 
     await page.waitForSelector("#email");
 
-    await page.type("#email", USERNAME, { delay: 50 });
-    await page.type("#password", PASSWORD, { delay: 50 });
+    await page.type("#email",USERNAME,{delay:50});
+    await page.type("#password",PASSWORD,{delay:50});
 
     const hasTurnstile = await detectTurnstile(page);
 
-    if (hasTurnstile) {
+    if(hasTurnstile){
 
-      const ok = await waitForTurnstileToken(page);
+      console.log("[INFO] 发现 Turnstile");
 
-      if (!ok) {
-        throw new Error("Turnstile 自动验证失败");
-      }
+      await simulateHuman(page);
+
+      await handleTurnstile(page);
+
+    }else{
+
+      console.log("[INFO] 未检测到 Turnstile");
 
     }
 
@@ -115,37 +187,44 @@ async function login() {
     await page.click('button[type="submit"]');
 
     await page.waitForNavigation({
-      waitUntil: "networkidle2",
-      timeout: 20000
+      waitUntil:"networkidle2",
+      timeout:30000
     });
 
-    const url = page.url();
-    const title = await page.title();
+    const url=page.url();
 
-    console.log("[INFO] 当前页面:", url);
+    console.log("[INFO] 当前页面:",url);
 
-    if (url.includes("login")) {
+    if(url.includes("login")){
+
+      await page.screenshot({
+        path:"login_failed.png",
+        fullPage:true
+      });
+
       throw new Error("仍然停留在登录页");
+
     }
 
     console.log("[SUCCESS] 登录成功");
 
-  } catch (err) {
+  }catch(err){
 
-    console.error("[ERROR]", err.message);
+    console.error("[ERROR]",err.message);
 
     await page.screenshot({
-      path: "login-error.png",
-      fullPage: true
+      path:"error.png",
+      fullPage:true
     });
 
     throw err;
 
-  } finally {
+  }finally{
 
     await browser.close();
 
   }
+
 }
 
 login();
