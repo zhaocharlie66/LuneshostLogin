@@ -57,31 +57,59 @@ async function simulateRealHuman(page) {
 }
 
 /**
- * 检测是否存在手动勾选框（适配嵌套容器场景）
+ * 检测是否存在手动勾选框（修复选择器错误，改用原生JS检测文本）
  */
 async function detectManualCheckbox(page) {
   logStep("DETECT", "检测是否存在手动勾选框");
   try {
-    // 覆盖所有可能的勾选框选择器（包括嵌套在 #AOzYg6 中的情况）
+    // 仅使用原生CSS支持的选择器，文本检测改用JS判断
     const checkboxInfo = await page.evaluate(() => {
-      const selectors = [
+      // 原生CSS选择器列表（无jQuery语法）
+      const baseSelectors = [
         '.cb-lb input[type="checkbox"]',
         '#AOzYg6 .cb-lb input',
-        '.cb-lb-t:contains("确认您是真人")',
-        '.cb-i'
+        '.cb-lb',
+        '.cb-i',
+        '.cb-lb-t'
       ];
+
       let exists = false;
       let selectorHit = "";
-      for (const sel of selectors) {
+      let hasVerifyText = false;
+
+      // 第一步：检测基础元素是否存在
+      for (const sel of baseSelectors) {
         const el = document.querySelector(sel);
         if (el) {
           exists = true;
           selectorHit = sel;
+          // 第二步：检测元素是否包含"确认您是真人"文本（原生JS方式）
+          if (el.textContent && el.textContent.includes("确认您是真人")) {
+            hasVerifyText = true;
+          }
           break;
         }
       }
-      return { exists, selectorHit };
+
+      // 额外检测：所有.cb-lb-t元素的文本
+      if (!hasVerifyText) {
+        const textElements = document.querySelectorAll('.cb-lb-t');
+        for (const el of textElements) {
+          if (el.textContent.includes("确认您是真人")) {
+            hasVerifyText = true;
+            exists = true;
+            selectorHit = ".cb-lb-t（含验证文本）";
+            break;
+          }
+        }
+      }
+
+      return { 
+        exists: exists && hasVerifyText, // 必须同时存在元素+验证文本
+        selectorHit 
+      };
     });
+
     logStep("DETECT", `手动勾选框检测结果：存在=${checkboxInfo.exists}，命中选择器=${checkboxInfo.selectorHit}`);
     return checkboxInfo;
   } catch (err) {
@@ -131,11 +159,16 @@ async function clickManualCheckbox(page, selectorHit) {
 }
 
 /**
- * 等待 Turnstile 验证完成（同时支持静默验证和手动勾选）
+ * 等待 Turnstile 验证完成（优化时间策略：延长静默期）
+ * 核心调整：
+ * 1. 纯静默窗口期：前15秒只检测Token，不触发手动勾选
+ * 2. 静默期检测间隔：5秒/次
+ * 3. 静默期后检测间隔：3秒/次
  */
 async function waitForTurnstileComplete(page) {
-  logStep("TURNSTILE", "开始等待 Turnstile 验证（支持静默+手动勾选）");
-  const timeout = 90000; // 总超时90秒
+  logStep("TURNSTILE", "开始等待 Turnstile 验证（优化时间策略）");
+  const timeout = 120000; // 总超时延长至120秒
+  const silentWindow = 15000; // 纯静默窗口期：15秒
   const start = Date.now();
   let manualCheckboxClicked = false;
 
@@ -160,11 +193,18 @@ async function waitForTurnstileComplete(page) {
         return true;
       }
 
-      // 3. 若 Token 无效，检测是否出现手动勾选框（未点击过则执行）
+      // 3. 纯静默窗口期内（前15秒）：只等Token，不检测手动勾选
+      if (Date.now() - start < silentWindow) {
+        logStep("TURNSTILE", `处于纯静默窗口期（剩余${Math.floor((silentWindow - (Date.now() - start))/1000)}s），仅等待Token生成`);
+        await sleep(5000); // 静默期检测间隔：5秒
+        continue;
+      }
+
+      // 4. 静默期结束后：检测手动勾选框（未点击过则执行）
       if (!manualCheckboxClicked && tokenInfo.valueLength === 0) {
         const { exists, selectorHit } = await detectManualCheckbox(page);
         if (exists) {
-          logStep("TURNSTILE", "静默验证失败，触发手动勾选模式");
+          logStep("TURNSTILE", "静默验证窗口期结束，未生成Token，触发手动勾选模式");
           const clickSuccess = await clickManualCheckbox(page, selectorHit);
           if (clickSuccess) {
             manualCheckboxClicked = true;
@@ -174,12 +214,13 @@ async function waitForTurnstileComplete(page) {
         }
       }
 
-      // 4. 未完成，继续等待（随机间隔）
+      // 5. 静默期后检测间隔：3秒
       await sleep(3000);
 
     } catch (err) {
       logStep("TURNSTILE", `验证检测失败：${err.message}，继续等待`);
-      await sleep(3000);
+      // 出错时延长等待时间，避免频繁重试
+      await sleep(4000);
     }
   }
 
@@ -187,14 +228,14 @@ async function waitForTurnstileComplete(page) {
   await page.screenshot({ path: "turnstile_final.png", fullPage: true });
   const pageHtml = await page.evaluate(() => document.body.innerHTML.substring(0, 2000));
   logStep("TURNSTILE", `❌ 验证超时，页面摘要：${pageHtml}`);
-  throw new Error("Turnstile 验证超时（90秒），未生成有效 Token");
+  throw new Error("Turnstile 验证超时（120秒），未生成有效 Token");
 }
 
 /**
- * 主登录函数（双模式适配）
+ * 主登录函数（优化时间策略）
  */
 async function login() {
-  logStep("LOGIN", "🔍 启动登录流程（适配静默+手动勾选双模式）");
+  logStep("LOGIN", "🔍 启动登录流程（优化Turnstile时间策略）");
   
   // 浏览器启动配置：极致隐藏自动化特征
   const browser = await puppeteer.launch({
@@ -218,7 +259,7 @@ async function login() {
   });
 
   const page = await browser.newPage();
-  page.setDefaultTimeout(150000); // 全局超时150秒
+  page.setDefaultTimeout(180000); // 全局超时延长至180秒
 
   // 手动设置真实的 User-Agent 和语言
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
@@ -286,8 +327,8 @@ async function login() {
       waitUntil: "networkidle0", // 等待所有网络请求完成（Turnstile 脚本加载）
       timeout: 120000
     });
-    logStep("LOGIN", "登录页加载完成（等待 Turnstile 初始化）");
-    await sleep(3000); // 额外等待3秒，让 Turnstile 脚本初始化
+    logStep("LOGIN", "登录页加载完成（延长初始化等待时间）");
+    await sleep(8000); // 核心调整：初始等待从3秒延长至8秒，给Turnstile足够初始化时间
 
     // 2. 模拟真人交互（核心：对抗静默检测）
     await simulateRealHuman(page);
@@ -306,8 +347,8 @@ async function login() {
     });
     await sleep(1200); // 输入后停顿，模拟检查密码
 
-    // 4. 关键步骤：等待 Turnstile 验证完成（双模式适配）
-    logStep("LOGIN", "启动 Turnstile 双模式验证（静默+手动勾选）");
+    // 4. 关键步骤：等待 Turnstile 验证完成（优化时间策略）
+    logStep("LOGIN", "启动 Turnstile 验证（含15秒纯静默窗口期）");
     await waitForTurnstileComplete(page);
 
     // 5. 再次模拟真人交互（提交前的犹豫）
@@ -349,7 +390,7 @@ async function login() {
       throw new Error("登录失败：未跳转到目标页面，仍在登录页");
     }
 
-    logStep("LOGIN", "✅ 登录成功！（双模式验证通过）");
+    logStep("LOGIN", "✅ 登录成功！（优化时间策略后验证通过）");
 
   } catch (err) {
     logStep("LOGIN", `❌ 登录流程失败：${err.message}`);
