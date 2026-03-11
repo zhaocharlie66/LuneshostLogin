@@ -172,7 +172,7 @@ msg:"turnstile失败"
 
 }
 
-await page.waitForTimeout(5000)
+await new Promise(r => setTimeout(r, 5000))
 
 let success=false
 
