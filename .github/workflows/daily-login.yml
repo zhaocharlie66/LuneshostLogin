@@ -22,7 +22,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        npm install puppeteer-extra puppeteer-extra-plugin-stealth puppeteer axios node-telegram-bot-api
+        npm install puppeteer-extra puppeteer-extra-plugin-stealth puppeteer-extra-plugin-user-agent-override puppeteer axios node-telegram-bot-api
 
     - name: Install Puppeteer dependencies
       run: |
