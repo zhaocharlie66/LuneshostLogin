@@ -1,7 +1,6 @@
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 
-// 仅保留有效的 stealth 插件
 puppeteer.use(StealthPlugin());
 
 // 环境变量
@@ -58,56 +57,144 @@ async function simulateRealHuman(page) {
 }
 
 /**
- * 等待 Turnstile 静默验证完成（核心：检测 token 生成）
+ * 检测是否存在手动勾选框（适配嵌套容器场景）
  */
-async function waitForSilentTurnstile(page) {
-  logStep("TURNSTILE", "开始等待静默验证完成（无勾选框场景）");
-  const timeout = 60000; // 静默验证超时60秒
+async function detectManualCheckbox(page) {
+  logStep("DETECT", "检测是否存在手动勾选框");
+  try {
+    // 覆盖所有可能的勾选框选择器（包括嵌套在 #AOzYg6 中的情况）
+    const checkboxInfo = await page.evaluate(() => {
+      const selectors = [
+        '.cb-lb input[type="checkbox"]',
+        '#AOzYg6 .cb-lb input',
+        '.cb-lb-t:contains("确认您是真人")',
+        '.cb-i'
+      ];
+      let exists = false;
+      let selectorHit = "";
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          exists = true;
+          selectorHit = sel;
+          break;
+        }
+      }
+      return { exists, selectorHit };
+    });
+    logStep("DETECT", `手动勾选框检测结果：存在=${checkboxInfo.exists}，命中选择器=${checkboxInfo.selectorHit}`);
+    return checkboxInfo;
+  } catch (err) {
+    logStep("DETECT", `勾选框检测失败：${err.message}`);
+    return { exists: false, selectorHit: "" };
+  }
+}
+
+/**
+ * 执行手动勾选操作（适配嵌套容器）
+ */
+async function clickManualCheckbox(page, selectorHit) {
+  logStep("TURNSTILE", "开始执行手动勾选操作");
+  try {
+    // 根据命中的选择器定位勾选框（优先定位 input，无则定位父容器）
+    let checkboxEl;
+    if (selectorHit.includes("input")) {
+      checkboxEl = await page.$(selectorHit);
+    } else {
+      // 若命中的是文本/图标，定位父容器 .cb-lb
+      checkboxEl = await page.$('.cb-lb');
+    }
+
+    if (!checkboxEl) {
+      throw new Error("未找到可点击的勾选框元素");
+    }
+
+    // 获取勾选框位置，模拟真人点击（点击左侧勾选图标区域）
+    const box = await checkboxEl.boundingBox();
+    logStep("TURNSTILE", `勾选框位置：x=${box.x}, y=${box.y}, 宽=${box.width}, 高=${box.height}`);
+    const clickX = box.x + 10; // 左侧 10px 处（勾选图标位置）
+    const clickY = box.y + box.height / 2;
+
+    // 模拟真人操作：移动 → 停顿 → 点击
+    await page.mouse.move(clickX, clickY, { steps: 8 });
+    await sleep(600); // 停顿犹豫
+    await page.mouse.click(clickX, clickY, { delay: Math.floor(Math.random() * 200) + 100 });
+    logStep("TURNSTILE", "✅ 手动勾选框点击完成");
+
+    // 点击后等待验证状态变化
+    await sleep(5000);
+    return true;
+  } catch (err) {
+    logStep("TURNSTILE", `勾选操作失败：${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * 等待 Turnstile 验证完成（同时支持静默验证和手动勾选）
+ */
+async function waitForTurnstileComplete(page) {
+  logStep("TURNSTILE", "开始等待 Turnstile 验证（支持静默+手动勾选）");
+  const timeout = 90000; // 总超时90秒
   const start = Date.now();
+  let manualCheckboxClicked = false;
 
   while (Date.now() - start < timeout) {
     const elapsed = Math.floor((Date.now() - start) / 1000);
     try {
-      // 检测静默验证核心标识：Cloudflare 生成的 token
+      // 1. 检测静默验证 Token（核心成功标识）
       const tokenInfo = await page.evaluate(() => {
         const tokenElement = document.querySelector('[name="cf-turnstile-response"]');
         return {
           exists: !!tokenElement,
-          hasValue: tokenElement ? tokenElement.value.length > 0 : false,
+          hasValue: tokenElement ? tokenElement.value.length > 50 : false, // Token 长度>50 才视为有效
           valueLength: tokenElement ? tokenElement.value.length : 0
         };
       });
 
-      logStep("TURNSTILE", `静默验证状态：token存在=${tokenInfo.exists}, token长度=${tokenInfo.valueLength}（已等${elapsed}s）`);
+      logStep("TURNSTILE", `验证状态：token存在=${tokenInfo.exists}, token长度=${tokenInfo.valueLength}, 已等待${elapsed}s`);
 
-      // 静默验证成功：token 存在且有值
+      // 2. 若 Token 有效，验证成功
       if (tokenInfo.exists && tokenInfo.hasValue) {
-        logStep("TURNSTILE", "✅ 静默验证成功！已生成有效 token");
+        logStep("TURNSTILE", "✅ 验证成功！已生成有效 Token");
         return true;
       }
 
-      // 未完成，继续等待（随机间隔，避免固定节奏）
-      await sleep(2000);
+      // 3. 若 Token 无效，检测是否出现手动勾选框（未点击过则执行）
+      if (!manualCheckboxClicked && tokenInfo.valueLength === 0) {
+        const { exists, selectorHit } = await detectManualCheckbox(page);
+        if (exists) {
+          logStep("TURNSTILE", "静默验证失败，触发手动勾选模式");
+          const clickSuccess = await clickManualCheckbox(page, selectorHit);
+          if (clickSuccess) {
+            manualCheckboxClicked = true;
+            // 点击后立即检查 Token
+            continue;
+          }
+        }
+      }
+
+      // 4. 未完成，继续等待（随机间隔）
+      await sleep(3000);
 
     } catch (err) {
-      logStep("TURNSTILE", `静默验证检测失败：${err.message}，继续等待`);
-      await sleep(2000);
+      logStep("TURNSTILE", `验证检测失败：${err.message}，继续等待`);
+      await sleep(3000);
     }
   }
 
-  // 超时兜底：打印页面 token 相关 HTML
-  const tokenHtml = await page.evaluate(() => {
-    return document.querySelector('form') ? document.querySelector('form').innerHTML.substring(0, 1000) : '无form表单';
-  });
-  logStep("TURNSTILE", `❌ 静默验证超时，token相关HTML：${tokenHtml}`);
-  throw new Error("Turnstile 静默验证超时（60秒），未生成有效 token");
+  // 超时兜底：保存页面截图和 HTML
+  await page.screenshot({ path: "turnstile_final.png", fullPage: true });
+  const pageHtml = await page.evaluate(() => document.body.innerHTML.substring(0, 2000));
+  logStep("TURNSTILE", `❌ 验证超时，页面摘要：${pageHtml}`);
+  throw new Error("Turnstile 验证超时（90秒），未生成有效 Token");
 }
 
 /**
- * 主登录函数（适配静默验证）
+ * 主登录函数（双模式适配）
  */
 async function login() {
-  logStep("LOGIN", "🔍 启动登录流程（适配 Turnstile 静默验证）");
+  logStep("LOGIN", "🔍 启动登录流程（适配静默+手动勾选双模式）");
   
   // 浏览器启动配置：极致隐藏自动化特征
   const browser = await puppeteer.launch({
@@ -131,11 +218,10 @@ async function login() {
   });
 
   const page = await browser.newPage();
-  page.setDefaultTimeout(120000); // 全局超时120秒
+  page.setDefaultTimeout(150000); // 全局超时150秒
 
-  // 手动设置真实的 User-Agent（替代无效插件）
+  // 手动设置真实的 User-Agent 和语言
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-  // 设置语言
   await page.setExtraHTTPHeaders({
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
   });
@@ -180,7 +266,7 @@ async function login() {
     delete window.__nightmare;
   });
 
-  // 监听 Turnstile 相关请求（排查静默验证请求）
+  // 监听 Turnstile 相关请求（排查验证请求）
   page.on('request', req => {
     const url = req.url();
     if (url.includes('turnstile') || url.includes('cdn-cgi/challenge')) {
@@ -188,7 +274,7 @@ async function login() {
     }
   });
 
-  // 监听页面 JS 报错（排查静默验证失败原因）
+  // 监听页面 JS 报错（排查验证失败原因）
   page.on('pageerror', err => {
     logStep("PAGE_ERROR", `页面 JS 报错：${err.message}`);
   });
@@ -197,11 +283,11 @@ async function login() {
     // 1. 打开登录页（慢加载，模拟真人）
     logStep("LOGIN", `打开登录页：${WEBSITE}`);
     await page.goto(WEBSITE, {
-      waitUntil: "networkidle0", // 等待所有网络请求完成（静默验证依赖网络）
+      waitUntil: "networkidle0", // 等待所有网络请求完成（Turnstile 脚本加载）
       timeout: 120000
     });
-    logStep("LOGIN", "登录页加载完成（等待静默验证初始化）");
-    await sleep(3000); // 额外等待3秒，让 Turnstile 脚本加载完成
+    logStep("LOGIN", "登录页加载完成（等待 Turnstile 初始化）");
+    await sleep(3000); // 额外等待3秒，让 Turnstile 脚本初始化
 
     // 2. 模拟真人交互（核心：对抗静默检测）
     await simulateRealHuman(page);
@@ -220,9 +306,9 @@ async function login() {
     });
     await sleep(1200); // 输入后停顿，模拟检查密码
 
-    // 4. 关键步骤：等待 Turnstile 静默验证完成（生成 token）
-    logStep("LOGIN", "等待 Turnstile 静默验证生成 token");
-    await waitForSilentTurnstile(page);
+    // 4. 关键步骤：等待 Turnstile 验证完成（双模式适配）
+    logStep("LOGIN", "启动 Turnstile 双模式验证（静默+手动勾选）");
+    await waitForTurnstileComplete(page);
 
     // 5. 再次模拟真人交互（提交前的犹豫）
     await simulateRealHuman(page);
@@ -240,7 +326,7 @@ async function login() {
     await submitBtn.click({ delay: Math.floor(Math.random() * 200) + 100 });
 
     // 7. 等待登录结果（延长等待时间，适配慢响应）
-    logStep("LOGIN", "等待登录跳转（静默验证后提交）");
+    logStep("LOGIN", "等待登录跳转（验证通过后提交）");
     await page.waitForNavigation({
       waitUntil: ["networkidle0", "domcontentloaded"],
       timeout: 90000
@@ -258,12 +344,12 @@ async function login() {
       logStep("LOGIN", "❌ 登录失败：仍停留在登录相关页面");
       await page.screenshot({ path: "login_failed.png", fullPage: true });
       // 打印页面关键信息，排查失败原因
-      const pageText = await page.evaluate(() => document.body.innerText);
-      logStep("LOGIN", `页面关键文本：${pageText.substring(0, 500)}`);
+      const pageText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+      logStep("LOGIN", `页面关键文本：${pageText}`);
       throw new Error("登录失败：未跳转到目标页面，仍在登录页");
     }
 
-    logStep("LOGIN", "✅ 登录成功！（静默验证通过）");
+    logStep("LOGIN", "✅ 登录成功！（双模式验证通过）");
 
   } catch (err) {
     logStep("LOGIN", `❌ 登录流程失败：${err.message}`);
