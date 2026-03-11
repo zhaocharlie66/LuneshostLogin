@@ -5,96 +5,63 @@ const WEBSITE = process.env.WEBSITE_URL;
 const USERNAME = process.env.USERNAME;
 const PASSWORD = process.env.PASSWORD;
 
-const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
-
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(r => setTimeout(r, ms));
 }
 
-async function sendTelegramMessage(message) {
-  if (!TG_TOKEN || !TG_CHAT) return;
+async function waitForTurnstileToken(page) {
 
-  try {
-    await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
-      chat_id: TG_CHAT,
-      text: message,
-      parse_mode: "Markdown"
-    });
-  } catch (e) {
-    console.error("Telegram发送失败:", e.message);
-  }
-}
+  console.log("[TURNSTILE] 等待自动验证...");
 
-async function detectTurnstile(page) {
-  console.log("[INFO] 检测 Turnstile...");
-
-  try {
-    await page.waitForSelector(
-      'iframe[src*="challenges.cloudflare.com"]',
-      { timeout: 10000 }
-    );
-
-    console.log("[INFO] 发现 Turnstile iframe");
-    return true;
-  } catch {
-    console.log("[INFO] 未检测到 Turnstile");
-    return false;
-  }
-}
-
-async function clickTurnstile(page) {
-  console.log("[INFO] 尝试点击 Turnstile...");
-
-  const frames = page.frames();
-
-  for (const frame of frames) {
-    if (frame.url().includes("challenges.cloudflare.com")) {
-      try {
-        const checkbox = await frame.waitForSelector(
-          'input[type="checkbox"], div[role="button"]',
-          { timeout: 5000 }
-        );
-
-        if (checkbox) {
-          await checkbox.click({ delay: 100 });
-          console.log("[INFO] Turnstile 已点击");
-          return true;
-        }
-      } catch (e) {
-        console.log("[WARN] 未找到 Turnstile checkbox");
-      }
-    }
-  }
-
-  console.log("[WARN] Turnstile 点击失败");
-  return false;
-}
-
-async function waitForTurnstileSolved(page) {
-  console.log("[INFO] 等待 Turnstile 完成验证...");
-
-  const timeout = 20000;
+  const timeout = 30000;
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
-    const solved = await page.evaluate(() => {
-      const textarea = document.querySelector(
+
+    const token = await page.evaluate(() => {
+      const el = document.querySelector(
         'textarea[name="cf-turnstile-response"]'
       );
-      return textarea && textarea.value.length > 0;
+      return el ? el.value : null;
     });
 
-    if (solved) {
-      console.log("[SUCCESS] Turnstile 验证成功");
+    if (token && token.length > 10) {
+      console.log("[TURNSTILE] 验证成功");
       return true;
     }
 
     await sleep(1000);
   }
 
-  console.log("[WARN] Turnstile 未确认完成");
+  console.log("[TURNSTILE] 未检测到 token");
   return false;
+}
+
+async function detectTurnstile(page) {
+
+  console.log("[INFO] 检测 Turnstile...");
+
+  const exists = await page.evaluate(() => {
+
+    if (document.querySelector('iframe[src*="challenges.cloudflare.com"]'))
+      return true;
+
+    if (document.querySelector('[data-sitekey]'))
+      return true;
+
+    if (document.querySelector('textarea[name="cf-turnstile-response"]'))
+      return true;
+
+    return false;
+  });
+
+  if (exists) {
+    console.log("[INFO] 发现 Turnstile");
+  } else {
+    console.log("[INFO] 未检测到 Turnstile");
+  }
+
+  return exists;
 }
 
 async function login() {
@@ -105,19 +72,18 @@ async function login() {
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-gpu",
       "--disable-blink-features=AutomationControlled"
     ]
   });
 
   const page = await browser.newPage();
 
+  page.setDefaultTimeout(30000);
+
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   );
-
-  page.setDefaultTimeout(20000);
 
   try {
 
@@ -136,21 +102,21 @@ async function login() {
 
     if (hasTurnstile) {
 
-      await sleep(2000);
+      const ok = await waitForTurnstileToken(page);
 
-      await clickTurnstile(page);
-
-      await waitForTurnstileSolved(page);
+      if (!ok) {
+        throw new Error("Turnstile 自动验证失败");
+      }
 
     }
 
-    console.log("[INFO] 提交登录");
+    console.log("[INFO] 点击 Submit");
 
     await page.click('button[type="submit"]');
 
     await page.waitForNavigation({
       waitUntil: "networkidle2",
-      timeout: 15000
+      timeout: 20000
     });
 
     const url = page.url();
@@ -158,34 +124,22 @@ async function login() {
 
     console.log("[INFO] 当前页面:", url);
 
-    if (!title.toLowerCase().includes("login")) {
-
-      console.log("[SUCCESS] 登录成功");
-
-      await sendTelegramMessage(
-        `*登录成功*\n时间: ${new Date().toISOString()}\nURL: ${url}\n标题: ${title}`
-      );
-
-    } else {
-
+    if (url.includes("login")) {
       throw new Error("仍然停留在登录页");
-
     }
 
-  } catch (error) {
+    console.log("[SUCCESS] 登录成功");
 
-    console.error("[ERROR]", error.message);
+  } catch (err) {
+
+    console.error("[ERROR]", err.message);
 
     await page.screenshot({
-      path: "login-failure.png",
+      path: "login-error.png",
       fullPage: true
     });
 
-    await sendTelegramMessage(
-      `*登录失败*\n时间: ${new Date().toISOString()}\n错误: ${error.message}`
-    );
-
-    throw error;
+    throw err;
 
   } finally {
 
