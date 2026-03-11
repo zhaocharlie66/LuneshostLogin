@@ -38,6 +38,7 @@ jobs:
       id: login-step
       run: node login.js
       env:
+        ACCOUNTS_BATCH: ${{ secrets.ACCOUNTS_BATCH }}
         WEBSITE_URL: ${{ secrets.WEBSITE_URL }}
         USERNAME: ${{ secrets.USERNAME }}
         PASSWORD: ${{ secrets.PASSWORD }}
