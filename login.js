@@ -1,13 +1,20 @@
 const puppeteer=require("puppeteer-extra")
 const Stealth=require("puppeteer-extra-plugin-stealth")
+
 const UA=require("./user_agents")
-const {sleep,rand,humanType,randomMouse}=require("./human")
 const sendTG=require("./telegram")
+const {sleep,rand,humanType,randomMouse}=require("./human")
 
 puppeteer.use(Stealth())
 
 const LOGIN_URL="https://betadash.lunes.host/login?next=/"
 const HOME_URL="https://betadash.lunes.host/"
+
+function randomUA(){
+
+return UA[Math.floor(Math.random()*UA.length)]
+
+}
 
 function parseAccounts(){
 
@@ -39,24 +46,16 @@ pass:p[1]
 }
 
 return arr
-
-}
-
-function randomUA(){
-
-return UA[Math.floor(Math.random()*UA.length)]
-
 }
 
 async function detectTurnstile(page){
 
 try{
 
-await page.waitForSelector("iframe[src*='turnstile']",{
-timeout:8000
-})
-
-console.log("检测到 Turnstile")
+await page.waitForSelector(
+"iframe[src*='turnstile']",
+{timeout:8000}
+)
 
 return true
 
@@ -69,17 +68,19 @@ return false
 
 async function waitTurnstile(page){
 
-console.log("等待 Turnstile 自动通过")
+for(let i=0;i<40;i++){
 
-for(let i=0;i<30;i++){
+const exist=await page.evaluate(()=>{
 
-const ok=await page.evaluate(()=>{
-
-return !document.querySelector("iframe[src*='turnstile']")
+return !!document.querySelector("iframe[src*='turnstile']")
 
 })
 
-if(ok)return true
+if(!exist){
+
+return true
+
+}
 
 await sleep(2000)
 
@@ -112,30 +113,45 @@ async function screenshot(page,name){
 try{
 
 await page.screenshot({
+
 path:`debug_${name}.png`
+
 })
 
 }catch{}
-
 }
 
-async function loginOne(account){
+async function launchBrowser(){
 
-const browser=await puppeteer.launch({
+return await puppeteer.launch({
 
 headless:true,
 
 args:[
+
 "--no-sandbox",
 "--disable-setuid-sandbox",
-"--disable-dev-shm-usage"
+"--disable-dev-shm-usage",
+"--disable-blink-features=AutomationControlled"
+
 ]
 
 })
 
+}
+
+async function loginOne(acc){
+
+const browser=await launchBrowser()
+
 const page=await browser.newPage()
 
 await page.setUserAgent(randomUA())
+
+await page.setViewport({
+width:1280,
+height:800
+})
 
 await page.goto(LOGIN_URL,{
 waitUntil:"networkidle2"
@@ -145,15 +161,17 @@ await randomMouse(page)
 
 await page.waitForSelector("#email")
 
-await humanType(page,"#email",account.email)
+await humanType(page,"#email",acc.email)
 
-await humanType(page,"#password",account.pass)
+await humanType(page,"#password",acc.pass)
 
 await sleep(rand(1000,3000))
 
 await page.click("button[type=submit]")
 
 if(await detectTurnstile(page)){
+
+console.log("检测到 Turnstile")
 
 const ok=await waitTurnstile(page)
 
@@ -164,23 +182,23 @@ await screenshot(page,"turnstile_fail")
 await browser.close()
 
 return{
-ok:false,
-msg:"turnstile失败"
+ok:false
 }
 
 }
 
 }
 
-await new Promise(r => setTimeout(r, 5000))
+await sleep(5000)
 
 let success=false
 
 try{
 
-await page.waitForSelector("a[href='/logout']",{
-timeout:10000
-})
+await page.waitForSelector(
+"a[href='/logout']",
+{timeout:10000}
+)
 
 success=true
 
@@ -193,8 +211,7 @@ await screenshot(page,"login_fail")
 await browser.close()
 
 return{
-ok:false,
-msg:"登录失败"
+ok:false
 }
 
 }
@@ -203,7 +220,9 @@ const server=await extractServer(page)
 
 if(server){
 
-await page.goto(`https://betadash.lunes.host/servers/${server}`)
+await page.goto(
+`https://betadash.lunes.host/servers/${server}`
+)
 
 await sleep(4000)
 
@@ -243,7 +262,7 @@ console.log("处理账号",acc.email)
 
 let result=null
 
-for(let retry=0;retry<3;retry++){
+for(let i=0;i<3;i++){
 
 try{
 
@@ -265,9 +284,9 @@ if(result&&result.ok){
 
 ok++
 
-const msg=`✅ Lunes 登录成功
-账号: ${acc.email}
-Server: ${result.server||"none"}`
+const msg=`✅ 登录成功
+账号:${acc.email}
+Server:${result.server||"none"}`
 
 console.log(msg)
 
@@ -277,8 +296,8 @@ await sendTG(msg)
 
 fail++
 
-const msg=`❌ Lunes 登录失败
-账号: ${acc.email}`
+const msg=`❌ 登录失败
+账号:${acc.email}`
 
 console.log(msg)
 
