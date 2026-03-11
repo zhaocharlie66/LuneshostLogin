@@ -1,0 +1,12 @@
+{
+  "name": "lunes-login-bot",
+  "version": "2.0.0",
+  "main": "login.js",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.6.7",
+    "puppeteer": "^22.8.2",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
