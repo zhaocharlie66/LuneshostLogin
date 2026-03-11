@@ -1,225 +1,267 @@
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const UserAgentOverride = require("puppeteer-extra-plugin-user-agent-override");
 
+// 核心：叠加反检测插件，彻底隐藏自动化特征
 puppeteer.use(StealthPlugin());
+puppeteer.use(UserAgentOverride({
+  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  locale: 'zh-CN,zh;q=0.9,en;q=0.8'
+}));
 
 // 环境变量
 const WEBSITE = process.env.WEBSITE_URL;
 const USERNAME = process.env.USERNAME;
 const PASSWORD = process.env.PASSWORD;
 
-// 带时间戳的详细日志（定位问题核心）
+// 带时间戳的详细日志
 function logStep(step, message) {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] [${step}] ${message}`);
 }
 
-// 休眠函数
+// 休眠函数（随机化，贴近真人）
 function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+  const randomDelay = Math.floor(Math.random() * 500) + ms;
+  return new Promise(r => setTimeout(r, randomDelay));
 }
 
-// 模拟真人行为（轻量适配无复杂验证）
-async function simulateHuman(page) {
-  logStep("HUMAN", "开始模拟用户行为");
-  // 随机鼠标移动（贴近真人操作）
-  const x1 = Math.floor(Math.random() * 300) + 100, y1 = Math.floor(Math.random() * 300) + 100;
-  const x2 = Math.floor(Math.random() * 300) + 200, y2 = Math.floor(Math.random() * 300) + 200;
-  await page.mouse.move(x1, y1);
-  await sleep(Math.floor(Math.random() * 400) + 200);
-  await page.mouse.move(x2, y2);
-  await sleep(Math.floor(Math.random() * 400) + 200);
-  // 轻微滚动
-  await page.mouse.wheel({ deltaY: Math.floor(Math.random() * 200) + 100 });
-  await sleep(Math.floor(Math.random() * 800) + 400);
-  logStep("HUMAN", "用户行为模拟完成");
-}
-
-// 检测Turnstile（适配cb-lb/cb-i容器）
-async function detectTurnstile(page) {
-  logStep("DETECT", "检测Turnstile勾选容器");
-  try {
-    await page.waitForSelector('body', { timeout: 8000 });
-    // 匹配实际的「确认你是真人」容器（核心修正）
-    const hasTurnstile = await page.evaluate(() => {
-      return !!document.querySelector('.cb-lb') || !!document.querySelector('.cb-i') || !!document.querySelector('.cb-lb-t');
-    });
-    logStep("DETECT", `是否检测到Turnstile：${hasTurnstile}`);
-    return hasTurnstile;
-  } catch (err) {
-    logStep("DETECT", `检测失败：${err.message}`);
-    return false;
+/**
+ * 模拟真人级交互（核心：慢节奏、随机化，对抗静默检测）
+ */
+async function simulateRealHuman(page) {
+  logStep("HUMAN", "开始模拟真人交互（对抗静默检测）");
+  
+  // 1. 随机鼠标移动（多段路径，模拟犹豫）
+  const paths = [
+    [Math.floor(Math.random() * 200) + 100, Math.floor(Math.random() * 200) + 100],
+    [Math.floor(Math.random() * 300) + 200, Math.floor(Math.random() * 300) + 200],
+    [Math.floor(Math.random() * 150) + 300, Math.floor(Math.random() * 250) + 150]
+  ];
+  for (const [x, y] of paths) {
+    await page.mouse.move(x, y, { steps: Math.floor(Math.random() * 10) + 5 }); // 分步移动，非瞬间跳转
+    await sleep(300);
   }
+
+  // 2. 随机滚动页面（模拟浏览）
+  await page.mouse.wheel({ deltaY: Math.floor(Math.random() * 400) + 200 });
+  await sleep(800);
+
+  // 3. 模拟鼠标悬停在输入框/按钮上（真人会先 hover 再操作）
+  await page.waitForSelector("#email", { visible: true });
+  const emailBox = await page.$("#email");
+  const emailBoxPos = await emailBox.boundingBox();
+  await page.mouse.move(emailBoxPos.x + 10, emailBoxPos.y + 10);
+  await sleep(500);
+
+  const passwordBox = await page.$("#password");
+  const passwordBoxPos = await passwordBox.boundingBox();
+  await page.mouse.move(passwordBoxPos.x + 10, passwordBoxPos.y + 10);
+  await sleep(500);
+
+  logStep("HUMAN", "真人交互模拟完成");
 }
 
-// 处理Turnstile纯勾选验证（核心修正：选择器+点击逻辑）
-async function handleTurnstile(page) {
-  logStep("TURNSTILE", "开始处理纯勾选Turnstile验证");
-  const timeout = 90000; // 缩短为90秒（纯勾选验证无需2分钟）
+/**
+ * 等待 Turnstile 静默验证完成（核心：检测 token 生成）
+ */
+async function waitForSilentTurnstile(page) {
+  logStep("TURNSTILE", "开始等待静默验证完成（无勾选框场景）");
+  const timeout = 60000; // 静默验证超时60秒
   const start = Date.now();
-  let isClicked = false; // 标记是否已点击勾选框
 
   while (Date.now() - start < timeout) {
     const elapsed = Math.floor((Date.now() - start) / 1000);
-    logStep("TURNSTILE", `轮询验证状态（已耗时${elapsed}s，剩余${Math.floor((timeout - (Date.now() - start))/1000)}s）`);
-
     try {
-      // 1. 获取当前验证核心状态（适配纯勾选）
-      const state = await page.evaluate(() => {
-        const result = {
-          // 验证成功标识：Cloudflare生成token/成功文本
-          hasToken: !!document.querySelector('[name="cf-turnstile-response"]')?.value,
-          successText: document.querySelector('.cb-lb-t')?.innerText || '',
-          // 实际勾选容器是否存在
-          hasCheckContainer: !!document.querySelector('.cb-lb'),
-          // 验证完成的视觉标识（部分页面会隐藏勾选框）
-          isCheckHidden: document.querySelector('.cb-lb')?.style.display === 'none'
+      // 检测静默验证核心标识：Cloudflare 生成的 token
+      const tokenInfo = await page.evaluate(() => {
+        const tokenElement = document.querySelector('[name="cf-turnstile-response"]');
+        return {
+          exists: !!tokenElement,
+          hasValue: tokenElement ? tokenElement.value.length > 0 : false,
+          valueLength: tokenElement ? tokenElement.value.length : 0
         };
-        // 纯勾选验证成功的核心判断：有token / 勾选框隐藏
-        result.verified = result.hasToken || result.isCheckHidden;
-        return result;
       });
 
-      // 打印详细状态（便于排查）
-      logStep("TURNSTILE", `当前状态：有Token=${state.hasToken}, 勾选容器存在=${state.hasCheckContainer}, 容器隐藏=${state.isCheckHidden}, 验证成功=${state.verified}`);
+      logStep("TURNSTILE", `静默验证状态：token存在=${tokenInfo.exists}, token长度=${tokenInfo.valueLength}（已等${elapsed}s）`);
 
-      // 2. 验证成功，直接返回
-      if (state.verified) {
-        logStep("TURNSTILE", "✅ 纯勾选验证成功！");
+      // 静默验证成功：token 存在且有值
+      if (tokenInfo.exists && tokenInfo.hasValue) {
+        logStep("TURNSTILE", "✅ 静默验证成功！已生成有效 token");
         return true;
       }
 
-      // 3. 未点击过，且勾选容器存在 → 模拟真人点击（核心修正）
-      if (state.hasCheckContainer && !isClicked) {
-        logStep("TURNSTILE", "准备点击「确认你是真人」勾选框");
-        // 定位实际的勾选容器（.cb-lb是核心容器）
-        const checkBox = await page.$('.cb-lb');
-        if (checkBox) {
-          // 获取容器位置，点击**左侧勾选框区域**（真人点击习惯，而非文字）
-          const box = await checkBox.boundingBox();
-          logStep("TURNSTILE", `勾选容器位置：x=${box.x}, y=${box.y}, 宽=${box.width}, 高=${box.height}`);
-          // 点击容器左侧10px位置（匹配cb-i勾选图标区域）
-          const clickX = box.x + 10, clickY = box.y + box.height / 2;
-          await page.mouse.move(clickX, clickY); // 先移动鼠标到勾选框
-          await sleep(600); // 停留片刻，模拟真人犹豫
-          await page.mouse.click(clickX, clickY, { delay: Math.floor(Math.random() * 150) + 50 }); // 模拟真人点击
-          logStep("TURNSTILE", "✅ 已点击「确认你是真人」勾选框");
-          isClicked = true;
-          await sleep(4000); // 点击后等待4秒，让Cloudflare生成token
-        } else {
-          logStep("TURNSTILE", "⚠️ 未找到.cb-lb容器，尝试匹配.cb-i");
-          await page.click('.cb-i', { delay: 200 });
-          isClicked = true;
-          await sleep(4000);
-        }
-      }
+      // 未完成，继续等待（随机间隔，避免固定节奏）
+      await sleep(2000);
 
-      // 4. 已点击，等待token生成（轮询间隔3秒）
-      if (isClicked) {
-        logStep("TURNSTILE", "已点击勾选框，等待Cloudflare生成验证Token");
-        await sleep(3000);
-      }
-
-    } catch (loopErr) {
-      logStep("TURNSTILE", `单次轮询失败：${loopErr.message}，继续重试`);
+    } catch (err) {
+      logStep("TURNSTILE", `静默验证检测失败：${err.message}，继续等待`);
       await sleep(2000);
     }
   }
 
-  // 超时兜底：保存截图+页面信息
-  logStep("TURNSTILE", "❌ 验证超时，保存截图到turnstile_timeout.png");
-  await page.screenshot({ path: "turnstile_timeout.png", fullPage: true });
-  // 打印勾选框周边HTML（便于确认最终DOM结构）
-  const checkHtml = await page.$eval('.cb-lb', el => el.outerHTML).catch(() => '未找到.cb-lb');
-  logStep("TURNSTILE", `勾选框最终DOM：${checkHtml}`);
-  throw new Error(`Turnstile纯勾选验证超时（90秒），已保存截图和DOM信息`);
+  // 超时兜底：打印页面 token 相关 HTML
+  const tokenHtml = await page.evaluate(() => {
+    return document.querySelector('form') ? document.querySelector('form').innerHTML.substring(0, 1000) : '无form表单';
+  });
+  logStep("TURNSTILE", `❌ 静默验证超时，token相关HTML：${tokenHtml}`);
+  throw new Error("Turnstile 静默验证超时（60秒），未生成有效 token");
 }
 
-// 主登录函数
+/**
+ * 主登录函数（适配静默验证）
+ */
 async function login() {
-  logStep("LOGIN", "🔍 启动登录流程");
-  // 新版无头模式（适配服务器无图形界面）
+  logStep("LOGIN", "🔍 启动登录流程（适配 Turnstile 静默验证）");
+  
+  // 浏览器启动配置：极致隐藏自动化特征
   const browser = await puppeteer.launch({
-    headless: "new",
+    headless: "new", // 新版无头模式（兼容性更好）
     args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled",
-      "--window-size=1920,1080", // 固定窗口，避免元素偏移
-      "--disable-web-security",
-      "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ]
+      "--no-sandbox",                // 服务器必须
+      "--disable-setuid-sandbox",    // 服务器必须
+      "--disable-dev-shm-usage",     // 解决内存不足
+      "--disable-blink-features=AutomationControlled", // 核心：禁用自动化标识
+      "--disable-features=VizDisplayCompositor",       // 禁用合成器，降低检测概率
+      "--window-size=1920,1080",     // 固定窗口，避免异常视口
+      "--start-maximized",           // 最大化窗口
+      "--enable-javascript",         // 确保JS运行（Turnstile 依赖）
+      "--disable-web-security",      // 避免跨域拦截
+      "--disable-features=IsolateOrigins,site-per-process", // 禁用隔离，贴近普通浏览器
+      "--disable-ipc-flooding-protection", // 禁用IPC限流
+    ],
+    ignoreHTTPSErrors: true,         // 忽略HTTPS错误（避免证书问题）
+    defaultViewport: null,           // 禁用默认视口，使用最大化窗口
+    slowMo: Math.floor(Math.random() * 50) + 30, // 全局慢动作（模拟真人操作速度）
   });
 
   const page = await browser.newPage();
-  await page.setViewport({ width: 1920, height: 1080 });
-  page.setDefaultTimeout(90000); // 全局超时90秒
+  page.setDefaultTimeout(120000); // 全局超时120秒
 
-  // 强化反爬：彻底隐藏自动化标识（Cloudflare重点检测）
+  // 终极反检测：覆盖所有自动化特征（Cloudflare 重点检测）
   await page.evaluateOnNewDocument(() => {
+    // 1. 彻底删除 webdriver 标识
     delete window.navigator.webdriver;
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US', 'en'] });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4] });
-    // 隐藏Puppeteer的视口标识
-    Object.defineProperty(window, 'innerWidth', { writable: true, value: 1920 });
-    Object.defineProperty(window, 'innerHeight', { writable: true, value: 1080 });
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+      configurable: true
+    });
+
+    // 2. 模拟真实浏览器的硬件信息
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+      get: () => Math.floor(Math.random() * 4) + 4, // 4-8核CPU
+      configurable: true
+    });
+    Object.defineProperty(navigator, 'deviceMemory', {
+      get: () => Math.floor(Math.random() * 4) + 4, // 4-8G内存
+      configurable: true
+    });
+
+    // 3. 模拟真实的语言/时区
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+      configurable: true
+    });
+    Object.defineProperty(Intl, 'DateTimeFormat', {
+      value: Intl.DateTimeFormat,
+      configurable: true
+    });
+
+    // 4. 隐藏 Puppeteer 的执行环境特征
+    window.chrome = {
+      app: { isInstalled: false },
+      runtime: {},
+      webstore: {}
+    };
+    delete window.$cdc_asdjflasutopfhvcZLmcfl_; // 清除 ChromeDevTools 标识
+    delete window._phantom;
+    delete window.__nightmare;
   });
 
-  // 监听页面JS报错（排查页面端问题）
-  page.on('pageerror', err => logStep("PAGE_ERROR", `页面JS报错：${err.message}`));
-  // 监听Turnstile网络请求（排查token请求是否被拦截）
+  // 监听 Turnstile 相关请求（排查静默验证请求）
   page.on('request', req => {
-    if (req.url().includes('turnstile') || req.url().includes('cf-chl')) {
-      logStep("NETWORK", `Turnstile请求：${req.method()} ${req.url().slice(0, 100)}...`);
+    const url = req.url();
+    if (url.includes('turnstile') || url.includes('cdn-cgi/challenge')) {
+      logStep("NETWORK", `Turnstile 请求：${req.method()} ${url.slice(0, 120)}...`);
     }
+  });
+
+  // 监听页面 JS 报错（排查静默验证失败原因）
+  page.on('pageerror', err => {
+    logStep("PAGE_ERROR", `页面 JS 报错：${err.message}`);
   });
 
   try {
-    // 1. 打开登录页
+    // 1. 打开登录页（慢加载，模拟真人）
     logStep("LOGIN", `打开登录页：${WEBSITE}`);
-    await page.goto(WEBSITE, { waitUntil: "networkidle2", timeout: 90000 });
-    logStep("LOGIN", "登录页加载完成");
+    await page.goto(WEBSITE, {
+      waitUntil: "networkidle0", // 等待所有网络请求完成（静默验证依赖网络）
+      timeout: 120000
+    });
+    logStep("LOGIN", "登录页加载完成（等待静默验证初始化）");
+    await sleep(3000); // 额外等待3秒，让 Turnstile 脚本加载完成
 
-    // 2. 模拟真人行为
-    await simulateHuman(page);
+    // 2. 模拟真人交互（核心：对抗静默检测）
+    await simulateRealHuman(page);
 
-    // 3. 输入账号密码（模拟真人打字速度）
-    logStep("LOGIN", "开始输入账号");
-    await page.waitForSelector("#email", { visible: true, timeout: 8000 });
-    await page.type("#email", USERNAME, { delay: Math.floor(Math.random() * 60) + 40 });
-    logStep("LOGIN", "开始输入密码");
-    await page.type("#password", PASSWORD, { delay: Math.floor(Math.random() * 60) + 40 });
-    logStep("LOGIN", "账号密码输入完成");
+    // 3. 输入账号密码（极致慢节奏，模拟真人打字）
+    logStep("LOGIN", "开始输入账号（真人打字速度）");
+    await page.waitForSelector("#email", { visible: true, timeout: 10000 });
+    await page.type("#email", USERNAME, {
+      delay: Math.floor(Math.random() * 100) + 50 // 50-150ms/字符
+    });
+    await sleep(800); // 输入后停顿
 
-    // 4. 检测并处理Turnstile
-    const hasTurnstile = await detectTurnstile(page);
-    if (hasTurnstile) {
-      logStep("LOGIN", "检测到Turnstile纯勾选验证，开始处理");
-      await simulateHuman(page); // 验证前再模拟一次行为，降低检测概率
-      await handleTurnstile(page);
+    logStep("LOGIN", "开始输入密码（真人打字速度）");
+    await page.type("#password", PASSWORD, {
+      delay: Math.floor(Math.random() * 100) + 50
+    });
+    await sleep(1200); // 输入后停顿，模拟检查密码
+
+    // 4. 关键步骤：等待 Turnstile 静默验证完成（生成 token）
+    logStep("LOGIN", "等待 Turnstile 静默验证生成 token");
+    await waitForSilentTurnstile(page);
+
+    // 5. 再次模拟真人交互（提交前的犹豫）
+    await simulateRealHuman(page);
+    await sleep(1000);
+
+    // 6. 点击登录按钮（模拟真人点击）
+    logStep("LOGIN", "点击登录按钮（模拟真人点击）");
+    const submitBtn = await page.$('button[type="submit"]');
+    if (!submitBtn) {
+      throw new Error("未找到登录提交按钮");
     }
+    // 先 hover 再点击（真人操作习惯）
+    await page.hover('button[type="submit"]');
+    await sleep(500);
+    await submitBtn.click({ delay: Math.floor(Math.random() * 200) + 100 });
 
-    // 5. 点击登录按钮
-    logStep("LOGIN", "点击登录提交按钮");
-    await page.waitForSelector('button[type="submit"]', { visible: true, timeout: 8000 });
-    await page.click('button[type="submit"]', { delay: Math.floor(Math.random() * 200) + 100 });
+    // 7. 等待登录结果（延长等待时间，适配慢响应）
+    logStep("LOGIN", "等待登录跳转（静默验证后提交）");
+    await page.waitForNavigation({
+      waitUntil: ["networkidle0", "domcontentloaded"],
+      timeout: 90000
+    });
 
-    // 6. 等待登录结果
-    logStep("LOGIN", "等待页面导航，确认登录结果");
-    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 });
     const currentUrl = page.url();
-    logStep("LOGIN", `登录后跳转URL：${currentUrl}`);
+    logStep("LOGIN", `登录后跳转 URL：${currentUrl}`);
 
-    // 7. 验证登录是否成功
-    if (currentUrl.includes("login")) {
-      logStep("LOGIN", "❌ 登录失败：仍停留在登录页");
+    // 8. 验证登录是否成功（兼容多场景）
+    const isLoginSuccess = !currentUrl.includes("login") && 
+                          !currentUrl.includes("signin") && 
+                          page.url() !== WEBSITE;
+
+    if (!isLoginSuccess) {
+      logStep("LOGIN", "❌ 登录失败：仍停留在登录相关页面");
       await page.screenshot({ path: "login_failed.png", fullPage: true });
+      // 打印页面关键信息，排查失败原因
+      const pageText = await page.evaluate(() => document.body.innerText);
+      logStep("LOGIN", `页面关键文本：${pageText.substring(0, 500)}`);
       throw new Error("登录失败：未跳转到目标页面，仍在登录页");
     }
 
-    logStep("LOGIN", "✅ 登录成功！");
+    logStep("LOGIN", "✅ 登录成功！（静默验证通过）");
 
   } catch (err) {
     logStep("LOGIN", `❌ 登录流程失败：${err.message}`);
@@ -232,7 +274,7 @@ async function login() {
   }
 }
 
-// 全局错误捕获，避免进程挂掉
+// 全局错误捕获
 process.on('unhandledRejection', (reason, promise) => {
   logStep("GLOBAL_ERROR", `未处理错误：${reason.message}`);
   process.exit(1);
